@@ -16,21 +16,28 @@
 package org.releng.zkw.tools;
 
 import com.sun.tools.attach.VirtualMachineDescriptor;
+import org.releng.zkw.metrics.JvmMetricsCollector;
+import org.releng.zkw.metrics.MetricsCollection;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import javax.management.AttributeList;
+import javax.management.AttributeNotFoundException;
 import javax.management.InstanceNotFoundException;
 import javax.management.IntrospectionException;
 import javax.management.MBeanAttributeInfo;
+import javax.management.MBeanException;
 import javax.management.MBeanFeatureInfo;
 import javax.management.MBeanInfo;
 import javax.management.MBeanServerConnection;
-import javax.management.ObjectInstance;
+import javax.management.MalformedObjectNameException;
+import javax.management.ObjectName;
+import javax.management.Query;
 import javax.management.ReflectionException;
 import java.io.IOException;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.util.Arrays;
-import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -46,6 +53,7 @@ public class ZkVmListener implements Runnable {
     private final Object shutdownLock = new Object();
     private final VirtualMachineDescriptor vmDescriptor;
     private final long pollPauseMillis;
+    private String prefix;
 
     public ZkVmListener(VirtualMachineDescriptor vmDescriptor, long pollPauseMillis) {
         this.vmDescriptor = vmDescriptor;
@@ -64,15 +72,17 @@ public class ZkVmListener implements Runnable {
     private void doListen() {
         LOGGER.info("VM listener is running for VM with PID=[{}]...", vmDescriptor.id());
         withZkVm(vmDescriptor, vm -> withJmxConnector(vm, con -> withMBeanServerConnection(con, mbsc -> {
-            synchronized (shutdownLock) {
-                while (!shutdown) {
-                    pollVM(mbsc);
-                    try {
-                        shutdownLock.wait(pollPauseMillis);
-                    } catch (InterruptedException e) {
+            MetricsCollection.withMetrics(mc -> {
+                synchronized (shutdownLock) {
+                    while (!shutdown) {
+                        pollVM(mc, mbsc);
+                        try {
+                            shutdownLock.wait(pollPauseMillis);
+                        } catch (InterruptedException e) {
+                        }
                     }
                 }
-            }
+            });
         })));
         LOGGER.info("VM listener for VM with PID=[{}] was stopped", vmDescriptor.id());
     }
@@ -84,35 +94,55 @@ public class ZkVmListener implements Runnable {
         }
     }
 
-    private void pollVM(MBeanServerConnection con) {
-        LOGGER.info("-----------------------------------------------");
-        Set<ObjectInstance> mBeanInstances = MBeanProvider.queryMBeans(null, null, con);
-        mBeanInstances.forEach(inst -> {
-            try {
-                MBeanInfo info = con.getMBeanInfo(inst.getObjectName());
-                LOGGER.info("MBean className = [{}], objectName = [{}], info = [{}]", inst.getClassName(),
-                        inst.getObjectName(), info);
-                List<String> readableAttributeNames = Arrays.asList(info.getAttributes()).stream()
-                        .filter(MBeanAttributeInfo::isReadable).map(MBeanFeatureInfo::getName)
-                        .collect(Collectors.toList());
-                String[] attributeNamesArray = new String[readableAttributeNames.size()];
-                attributeNamesArray = readableAttributeNames.toArray(attributeNamesArray);
-                try {
-                    AttributeList attrs = con.getAttributes(inst.getObjectName(), attributeNamesArray);
-                    attrs.asList().forEach(attr -> {
-                        try {
-                            LOGGER.info("{}: {}", attr.getName(), attr.getValue());
-                        } catch (Throwable e) {
-                            LOGGER.error("Attribute print error", e);
-                        }
-                    });
-                } catch (Throwable e) {
-                    LOGGER.error("Attribute loading error", e);
-                }
-                LOGGER.info("-----------------------------------------------");
-            } catch (InstanceNotFoundException | IntrospectionException | ReflectionException | IOException e) {
-                throw new RuntimeException(e);
-            }
-        });
+    private void pollVM(MetricsCollection mc, MBeanServerConnection con) {
+        JvmMetricsCollector.collectMetrics(getMetricsPrefix(con), con, mc);
     }
+
+    private String getMetricsPrefix(MBeanServerConnection con) {
+        if (prefix != null) {
+            return prefix;
+        }
+        String hostname = getLocalHostName();
+        Optional<String> standaloneZkPort = tryResolveStandaloneZKPort(con);
+        if (standaloneZkPort.isPresent()) {
+            prefix = "one_min." + hostname + ".zookeeper." + standaloneZkPort.get();
+        } else {
+            prefix = "one_min." + hostname + ".zookeeper." + vmDescriptor.id();
+        }
+        return prefix;
+    }
+
+    private Optional<String> tryResolveStandaloneZKPort(MBeanServerConnection con) {
+        try {
+            Set<ObjectName> names =  con.queryNames(new ObjectName("org.apache.ZooKeeperService:name0=StandaloneServer_port*"),
+                    Query.isInstanceOf(Query.value("org.apache.zookeeper.server.ZooKeeperServerBean")));
+            if (names.isEmpty()) {
+                return Optional.empty();
+            }
+            ObjectName name = names.iterator().next();
+            MBeanInfo info = con.getMBeanInfo(name);
+            Set<String> readableAttributes = Arrays.asList(info.getAttributes()).stream()
+                    .filter(MBeanAttributeInfo::isReadable).map(MBeanFeatureInfo::getName)
+                    .collect(Collectors.toSet());
+            if (!readableAttributes.contains("ClientPort")) {
+                return Optional.empty();
+            }
+            String clientPort = (String) con.getAttribute(name, "ClientPort");
+            if (clientPort == null || clientPort.trim().isEmpty()) {
+                return Optional.empty();
+            }
+            return Optional.of(clientPort.replaceAll("\\s", "").replace(".", "_").replace(":", "_"));
+        } catch (IOException | MalformedObjectNameException | IntrospectionException | ReflectionException | InstanceNotFoundException | AttributeNotFoundException | MBeanException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private String getLocalHostName() {
+        try {
+            return InetAddress.getLocalHost().getHostName();
+        } catch (UnknownHostException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
 }
