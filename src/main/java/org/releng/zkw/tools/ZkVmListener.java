@@ -18,29 +18,21 @@ package org.releng.zkw.tools;
 import com.sun.tools.attach.VirtualMachineDescriptor;
 import org.releng.zkw.metrics.JvmMetricsCollector;
 import org.releng.zkw.metrics.MetricsCollection;
+import org.releng.zkw.metrics.ZkMetricsCollector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import javax.management.AttributeNotFoundException;
-import javax.management.InstanceNotFoundException;
-import javax.management.IntrospectionException;
-import javax.management.MBeanAttributeInfo;
-import javax.management.MBeanException;
-import javax.management.MBeanFeatureInfo;
-import javax.management.MBeanInfo;
 import javax.management.MBeanServerConnection;
-import javax.management.MalformedObjectNameException;
 import javax.management.ObjectName;
 import javax.management.Query;
-import javax.management.ReflectionException;
-import java.io.IOException;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
-import java.util.Arrays;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.stream.Collectors;
 
+import static org.releng.zkw.tools.AttributesHelper.getBeanAttributes;
+import static org.releng.zkw.tools.AttributesHelper.queryNames;
 import static org.releng.zkw.tools.JmxConnectionProvider.withJmxConnector;
 import static org.releng.zkw.tools.MBeanServerConnectionProvider.withMBeanServerConnection;
 import static org.releng.zkw.tools.ZkVmProvider.withZkVm;
@@ -96,6 +88,7 @@ public class ZkVmListener implements Runnable {
 
     private void pollVM(MetricsCollection mc, MBeanServerConnection con) {
         JvmMetricsCollector.collectMetrics(getMetricsPrefix(con), con, mc);
+        ZkMetricsCollector.collectMetrics(getMetricsPrefix(con), con, mc);
     }
 
     private String getMetricsPrefix(MBeanServerConnection con) {
@@ -113,28 +106,19 @@ public class ZkVmListener implements Runnable {
     }
 
     private Optional<String> tryResolveStandaloneZKPort(MBeanServerConnection con) {
-        try {
-            Set<ObjectName> names =  con.queryNames(new ObjectName("org.apache.ZooKeeperService:name0=StandaloneServer_port*"),
-                    Query.isInstanceOf(Query.value("org.apache.zookeeper.server.ZooKeeperServerBean")));
-            if (names.isEmpty()) {
-                return Optional.empty();
-            }
-            ObjectName name = names.iterator().next();
-            MBeanInfo info = con.getMBeanInfo(name);
-            Set<String> readableAttributes = Arrays.asList(info.getAttributes()).stream()
-                    .filter(MBeanAttributeInfo::isReadable).map(MBeanFeatureInfo::getName)
-                    .collect(Collectors.toSet());
-            if (!readableAttributes.contains("ClientPort")) {
-                return Optional.empty();
-            }
-            String clientPort = (String) con.getAttribute(name, "ClientPort");
-            if (clientPort == null || clientPort.trim().isEmpty()) {
-                return Optional.empty();
-            }
-            return Optional.of(clientPort.replaceAll("\\s", "").replace(".", "_").replace(":", "_"));
-        } catch (IOException | MalformedObjectNameException | IntrospectionException | ReflectionException | InstanceNotFoundException | AttributeNotFoundException | MBeanException e) {
-            throw new RuntimeException(e);
+        Set<ObjectName> zkServerBeanNames = queryNames(con, "org.apache.ZooKeeperService:name0=StandaloneServer_port*",
+                Query.isInstanceOf(Query.value("org.apache.zookeeper.server.ZooKeeperServerBean")));
+        if (zkServerBeanNames.isEmpty()) {
+            return Optional.empty();
         }
+        ObjectName name = zkServerBeanNames.iterator().next();
+        Map<String, Object> attributes = getBeanAttributes(con, name, "ClientPort");
+        if(!attributes.containsKey("ClientPort") || attributes.get("ClientPort") == null
+                || ((String) attributes.get("ClientPort")).trim().isEmpty())
+        {
+            return Optional.empty();
+        }
+        return Optional.of(((String) attributes.get("ClientPort")).replaceAll("\\s", "").replace(".", "_").replace(":", "_"));
     }
 
     private String getLocalHostName() {

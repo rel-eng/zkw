@@ -15,24 +15,14 @@
  */
 package org.releng.zkw.metrics;
 
-import javax.management.AttributeList;
-import javax.management.InstanceNotFoundException;
-import javax.management.IntrospectionException;
-import javax.management.MBeanAttributeInfo;
-import javax.management.MBeanFeatureInfo;
-import javax.management.MBeanInfo;
 import javax.management.MBeanServerConnection;
-import javax.management.MalformedObjectNameException;
 import javax.management.ObjectName;
-import javax.management.ReflectionException;
 import javax.management.openmbean.CompositeData;
-import java.io.IOException;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
+
+import static org.releng.zkw.tools.AttributesHelper.getBeanAttributes;
+import static org.releng.zkw.tools.AttributesHelper.queryNames;
 
 public class JvmMetricsCollector {
 
@@ -48,7 +38,7 @@ public class JvmMetricsCollector {
     }
 
     private static void collectMemoryPoolMetrics(String prefix, MBeanServerConnection con, MetricsCollection metrics) {
-        Set<ObjectName> memoryPoolBeanNames = queryNames(con, "java.lang:type=MemoryPool,name=*");
+        Set<ObjectName> memoryPoolBeanNames = queryNames(con, "java.lang:type=MemoryPool,name=*", null);
         memoryPoolBeanNames.forEach(n -> {
             Map<String, Object> attributes = getBeanAttributes(con, n, "Name", "Usage", "PeakUsage", "CollectionUsage",
                     "UsageThreshold", "UsageThresholdCount", "UsageThresholdSupported", "CollectionUsageThreshold",
@@ -144,7 +134,7 @@ public class JvmMetricsCollector {
     }
 
     private static void collectMemoryMetrics(String prefix, MBeanServerConnection con, MetricsCollection metrics) {
-        Set<ObjectName> memoryBeanNames = queryNames(con, "java.lang:type=Memory");
+        Set<ObjectName> memoryBeanNames = queryNames(con, "java.lang:type=Memory", null);
         if (memoryBeanNames.isEmpty()) {
             return;
         }
@@ -196,7 +186,7 @@ public class JvmMetricsCollector {
     }
 
     private static void collectGCMetrics(String prefix, MBeanServerConnection con, MetricsCollection metrics) {
-        Set<ObjectName> gcBeanNames = queryNames(con, "java.lang:type=GarbageCollector,name=*");
+        Set<ObjectName> gcBeanNames = queryNames(con, "java.lang:type=GarbageCollector,name=*", null);
         gcBeanNames.forEach(n -> {
             Map<String, Object> attributes = getBeanAttributes(con, n, "Name", "CollectionCount", "CollectionTime",
                     "Valid");
@@ -220,7 +210,7 @@ public class JvmMetricsCollector {
     }
 
     private static void collectThreadMetrics(String prefix, MBeanServerConnection con, MetricsCollection metrics) {
-        Set<ObjectName> threadingBeanNames = queryNames(con, "java.lang:type=Threading");
+        Set<ObjectName> threadingBeanNames = queryNames(con, "java.lang:type=Threading", null);
         if (threadingBeanNames.isEmpty()) {
             return;
         }
@@ -246,7 +236,7 @@ public class JvmMetricsCollector {
     }
 
     private static void collectBufferPoolMetrics(String prefix, MBeanServerConnection con, MetricsCollection metrics) {
-        Set<ObjectName> booferPoolBeanNames = queryNames(con, "java.nio:type=BufferPool,name=*");
+        Set<ObjectName> booferPoolBeanNames = queryNames(con, "java.nio:type=BufferPool,name=*", null);
         booferPoolBeanNames.forEach(n -> {
             Map<String, Object> attributes = getBeanAttributes(con, n, "Name", "Count", "TotalCapacity", "MemoryUsed");
             if (!attributes.containsKey("Name")) {
@@ -269,7 +259,7 @@ public class JvmMetricsCollector {
     }
 
     private static void collectCompilationMetrics(String prefix, MBeanServerConnection con, MetricsCollection metrics) {
-        Set<ObjectName> compilationBeanNames = queryNames(con, "java.lang:type=Compilation");
+        Set<ObjectName> compilationBeanNames = queryNames(con, "java.lang:type=Compilation", null);
         if (compilationBeanNames.isEmpty()) {
             return;
         }
@@ -282,7 +272,7 @@ public class JvmMetricsCollector {
     }
 
     private static void collectClassLoadingMetrics(String prefix, MBeanServerConnection con, MetricsCollection metrics) {
-        Set<ObjectName> classLoadingBeanNames = queryNames(con, "java.lang:type=ClassLoading");
+        Set<ObjectName> classLoadingBeanNames = queryNames(con, "java.lang:type=ClassLoading", null);
         if (classLoadingBeanNames.isEmpty()) {
             return;
         }
@@ -304,7 +294,7 @@ public class JvmMetricsCollector {
     }
 
     private static void collectOSMetrics(String prefix, MBeanServerConnection con, MetricsCollection metrics) {
-        Set<ObjectName> osBeanNames = queryNames(con, "java.lang:type=OperatingSystem");
+        Set<ObjectName> osBeanNames = queryNames(con, "java.lang:type=OperatingSystem", null);
         if (osBeanNames.isEmpty()) {
             return;
         }
@@ -389,60 +379,6 @@ public class JvmMetricsCollector {
 
     private static String osMetricName(String prefix, String metric) {
         return prefix + ".os." + metric;
-    }
-
-    private static Map<String, Object> getBeanAttributes(MBeanServerConnection con, ObjectName beanName,
-            String... requestedAtributes)
-    {
-        Set<String> attributes = findReadableAttributes(con, beanName);
-        String[] attributesToQuery = collectAttributesToQuery(attributes, requestedAtributes);
-        try {
-            AttributeList receivedAttributes = con.getAttributes(beanName, attributesToQuery);
-            Map<String, Object> result = new HashMap<>();
-            receivedAttributes.asList().forEach(a -> result.put(a.getName(), a.getValue()));
-            return result;
-        } catch (InstanceNotFoundException | ReflectionException | IOException e) {
-            throw new RuntimeException(e);
-        }
-
-    }
-
-    private static Set<String> findReadableAttributes(MBeanServerConnection con, ObjectName beanName) {
-        try {
-            MBeanInfo info = con.getMBeanInfo(beanName);
-            return Arrays.asList(info.getAttributes()).stream()
-                    .filter(MBeanAttributeInfo::isReadable).map(MBeanFeatureInfo::getName)
-                    .collect(Collectors.toSet());
-        } catch (InstanceNotFoundException | IntrospectionException | ReflectionException | IOException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    private static String[] collectAttributesToQuery(Set<String> existingAttributes, String... requestedAtributes) {
-        Set<String> attributesToQuery = new HashSet<>();
-        for (String attribute : requestedAtributes) {
-            if (existingAttributes.contains(attribute)) {
-                attributesToQuery.add(attribute);
-            }
-        }
-        String[] result = new String[attributesToQuery.size()];
-        return attributesToQuery.toArray(result);
-    }
-
-    private static Set<ObjectName> queryNames(MBeanServerConnection con, String name) {
-        try {
-            return con.queryNames(buildObjectName(name), null);
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    private static ObjectName buildObjectName(String name) {
-        try {
-            return new ObjectName(name);
-        } catch (MalformedObjectNameException e) {
-            throw new RuntimeException(e);
-        }
     }
 
 }
